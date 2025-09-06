@@ -3,6 +3,7 @@ import logging
 import sqlite3
 import hashlib
 import requests
+import argparse
 from datetime import datetime
 from urllib.parse import urlparse, urlunparse
 from bs4 import BeautifulSoup
@@ -20,8 +21,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Constants
-UTILITY_NAME = "Austin Energy"
-TARGET_URL = "https://austinenergy.com/rates/approved-rates-schedules"
 DB_PATH = "./resources/tariff_monitor.db"
 
 def setup_database():
@@ -45,6 +44,24 @@ def setup_database():
     conn.close()
     logger.info("Database setup complete.")
 
+def read_seed_urls(input_file):
+    """Read seed URLs from input file, one URL per line."""
+    urls = []
+    try:
+        with open(input_file, 'r') as f:
+            for line in f:
+                url = line.strip()
+                if url and not url.startswith('#'):  # Skip empty lines and comments
+                    urls.append(url)
+        logger.info(f"Read {len(urls)} seed URLs from {input_file}")
+        return urls
+    except FileNotFoundError:
+        logger.error(f"Input file not found: {input_file}")
+        return []
+    except Exception as e:
+        logger.error(f"Error reading input file: {e}")
+        return []
+
 def scrape_links(url):
     """Scrape all PDF links from the given URL."""
     logger.info(f"Scraping links from {url}")
@@ -61,11 +78,24 @@ def scrape_links(url):
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
         links = []
+
+        # Get base URL for relative links
+        parsed_base = urlparse(url)
+        base_url = f"{parsed_base.scheme}://{parsed_base.netloc}"
+
         for a in soup.find_all('a', href=True):
             href = a['href']
             is_pdf = '.pdf' in href.lower()
             if is_pdf:
-                full_url = href if href.startswith('http') else f"https://austinenergy.com{href}"
+                if href.startswith('http'):
+                    full_url = href
+                elif href.startswith('//'):
+                    full_url = f"https:{href}"
+                elif href.startswith('/'):
+                    full_url = f"{base_url}{href}"
+                else:
+                    full_url = f"{base_url}/{href}"
+
                 parsed = urlparse(full_url)
                 clean_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
                 logger.info(f"Cleaned Potential Tariff PDF URL: {clean_url}")
@@ -178,28 +208,72 @@ def update_database(utility_name, url, document_name, pdf_hash):
     conn.commit()
     conn.close()
 
-def main():
-    """Main execution function."""
-    logger.info("Starting utility tariff monitor")
-    setup_database()
+def get_utility_name_from_url(url):
+    """Derive utility name from URL domain."""
+    parsed = urlparse(url)
+    domain = parsed.netloc
+    # Remove www. prefix if present
+    if domain.startswith('www.'):
+        domain = domain[4:]
+    # Capitalize words
+    utility_name = ' '.join(word.capitalize() for word in domain.split('.'))
+    return utility_name
 
-    links = scrape_links(TARGET_URL)
+def process_seed_url(seed_url):
+    """Process a single seed URL through the full pipeline."""
+    logger.info(f"{'='*60}")
+    logger.info(f"PROCESSING SEED URL: {seed_url}")
+    logger.info(f"{'='*60}")
+
+    utility_name = get_utility_name_from_url(seed_url)
+    logger.info(f"Derived utility name: {utility_name}")
+
+    links = scrape_links(seed_url)
     if not links:
-        logger.error("No links found")
+        logger.error(f"No links found for {seed_url}")
         return
 
     best_url = select_best_url_with_llm(links)
     if not best_url:
-        logger.error("No URL selected by LLM")
+        logger.error(f"No URL selected by LLM for {seed_url}")
         return
 
     pdf_hash, document_name = download_and_hash_pdf(best_url)
     if not pdf_hash:
-        logger.error("Failed to download or hash PDF")
+        logger.error(f"Failed to download or hash PDF for {seed_url}")
         return
 
-    update_database(UTILITY_NAME, best_url, document_name, pdf_hash)
-    logger.info("Process complete")
+    update_database(utility_name, best_url, document_name, pdf_hash)
+    logger.info(f"Completed processing for {seed_url}")
+
+def main():
+    """Main execution function."""
+    parser = argparse.ArgumentParser(description='Monitor utility tariff documents')
+    parser.add_argument('--tariff-webpage-urls', required=True, help='Path to file containing tariff webpage URLs (one per line)')
+    parser.add_argument('--initialize', action='store_true', help='Initialize the database')
+
+    args = parser.parse_args()
+
+    logger.info("Starting utility tariff monitor")
+
+    if args.initialize:
+        setup_database()
+
+    seed_urls = read_seed_urls(args.tariff_webpage_urls)
+    if not seed_urls:
+        logger.error("No seed URLs found in input file")
+        return
+
+    logger.info(f"Processing {len(seed_urls)} seed URLs")
+
+    for seed_url in seed_urls:
+        try:
+            process_seed_url(seed_url)
+        except Exception as e:
+            logger.error(f"Error processing {seed_url}: {e}")
+            continue
+
+    logger.info("All seed URLs processed")
 
 if __name__ == "__main__":
     main()
