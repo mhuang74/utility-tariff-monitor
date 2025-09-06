@@ -237,10 +237,12 @@ def get_utility_name_from_url(url):
     utility_name = ' '.join(word.capitalize() for word in domain.split('.'))
     return utility_name
 
-def process_seed_url(seed_url):
+def process_seed_url(seed_url, quick_mode=False):
     """Process a single seed URL through the full pipeline."""
     logger.info(f"{'='*60}")
     logger.info(f"PROCESSING SEED URL: {seed_url}")
+    if quick_mode:
+        logger.info("QUICK MODE ENABLED")
     logger.info(f"{'='*60}")
 
     utility_name = get_utility_name_from_url(seed_url)
@@ -266,6 +268,36 @@ def process_seed_url(seed_url):
         logger.warning(f"Link text not found for selected URL: {best_url}")
         link_text = ""
 
+    # Quick mode logic
+    if quick_mode:
+        logger.info("Quick mode: Checking for existing document...")
+        existing_last_modified = find_existing_document(utility_name, best_url, link_text)
+        if existing_last_modified:
+            # Fetch current Last-Modified header
+            current_last_modified = get_pdf_last_modified(best_url)
+            if current_last_modified:
+                # Compare timestamps (considering them equal if within 1 second)
+                if abs((current_last_modified - existing_last_modified).total_seconds()) < 1:
+                    logger.info("PDF has not changed (Last-Modified matches). Skipping download.")
+                    # Update last_checked timestamp
+                    conn = sqlite3.connect(DB_PATH)
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        UPDATE tariff_documents
+                        SET last_checked = ?
+                        WHERE utility_name = ? AND (url = ? OR link_text = ?) AND status = 'ACTIVE'
+                    """, (datetime.now(), utility_name, best_url, link_text))
+                    conn.commit()
+                    conn.close()
+                    logger.info(f"Completed processing for {seed_url} (quick mode - no changes)")
+                    return
+                else:
+                    logger.info("PDF has been modified. Proceeding with download.")
+            else:
+                logger.warning("Could not fetch Last-Modified header. Proceeding with download.")
+        else:
+            logger.info("No existing document found. Proceeding with download.")
+
     pdf_hash, document_name, last_modified = download_and_hash_pdf(best_url)
     if not pdf_hash:
         logger.error(f"Failed to download or hash PDF for {seed_url}")
@@ -274,11 +306,58 @@ def process_seed_url(seed_url):
     update_database(utility_name, best_url, document_name, pdf_hash, last_modified, link_text)
     logger.info(f"Completed processing for {seed_url}")
 
+def get_pdf_last_modified(url):
+    """Fetch Last-Modified header from PDF URL using HEAD request."""
+    logger.info(f"Fetching Last-Modified header from {url}")
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        }
+        response = requests.head(url, headers=headers, timeout=10)
+        response.raise_for_status()
+
+        if 'Last-Modified' in response.headers:
+            try:
+                last_modified = parsedate_to_datetime(response.headers['Last-Modified'])
+                logger.info(f"Last-Modified header: {last_modified}")
+                return last_modified
+            except Exception as e:
+                logger.warning(f"Failed to parse Last-Modified header: {e}")
+                return None
+        else:
+            logger.warning("No Last-Modified header found")
+            return None
+    except requests.RequestException as e:
+        logger.error(f"Error fetching Last-Modified header: {e}")
+        return None
+
+def find_existing_document(utility_name, url, link_text):
+    """Find existing document in database using fuzzy match criteria."""
+    logger.info("Checking for existing document in database...")
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    # Fuzzy match: check if record exists based on url or link_text
+    cursor.execute("""
+        SELECT id, tariff_last_updated FROM tariff_documents
+        WHERE utility_name = ? AND (url = ? OR link_text = ?) AND status = 'ACTIVE'
+    """, (utility_name, url, link_text))
+    existing = cursor.fetchone()
+    conn.close()
+
+    if existing:
+        logger.info(f"Found existing document with tariff_last_updated: {existing[1]}")
+        return existing[1]  # Return the tariff_last_updated timestamp
+    else:
+        logger.info("No existing document found")
+        return None
+
 def main():
     """Main execution function."""
     parser = argparse.ArgumentParser(description='Monitor utility tariff documents')
     parser.add_argument('--tariff-webpage-urls', required=True, help='Path to file containing tariff webpage URLs (one per line)')
     parser.add_argument('--initialize', action='store_true', help='Initialize the database')
+    parser.add_argument('--quick', action='store_true', help='Quick mode: skip download if Last-Modified matches database')
 
     args = parser.parse_args()
 
@@ -296,7 +375,7 @@ def main():
 
     for seed_url in seed_urls:
         try:
-            process_seed_url(seed_url)
+            process_seed_url(seed_url, args.quick)
         except Exception as e:
             logger.error(f"Error processing {seed_url}: {e}")
             continue
