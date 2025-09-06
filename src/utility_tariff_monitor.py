@@ -38,7 +38,8 @@ def setup_database():
             hash TEXT,
             last_checked DATETIME,
             tariff_last_updated DATETIME,
-            status TEXT
+            status TEXT,
+            link_text TEXT
         )
     ''')
     conn.commit()
@@ -174,7 +175,7 @@ def download_and_hash_pdf(url):
         logger.error(f"Error downloading PDF: {e}")
         return None, None, None
 
-def update_database(utility_name, url, document_name, pdf_hash, last_modified):
+def update_database(utility_name, url, document_name, pdf_hash, last_modified, link_text):
     """Update or insert record in database."""
     logger.info("Updating database...")
     conn = sqlite3.connect(DB_PATH)
@@ -184,8 +185,11 @@ def update_database(utility_name, url, document_name, pdf_hash, last_modified):
     # Determine tariff_last_updated value
     tariff_last_updated = last_modified if last_modified else now
 
-    # Check if URL exists
-    cursor.execute("SELECT id, hash FROM tariff_documents WHERE utility_name = ? AND url = ?", (utility_name, url))
+    # Fuzzy match: check if record exists based on hash, url, or link_text
+    cursor.execute("""
+        SELECT id, hash FROM tariff_documents
+        WHERE utility_name = ? AND (hash = ? OR url = ? OR link_text = ?)
+    """, (utility_name, pdf_hash, url, link_text))
     existing = cursor.fetchone()
 
     if existing:
@@ -193,9 +197,9 @@ def update_database(utility_name, url, document_name, pdf_hash, last_modified):
         if existing[1] != pdf_hash:
             cursor.execute("""
                 UPDATE tariff_documents
-                SET hash = ?, last_checked = ?, tariff_last_updated = ?
+                SET hash = ?, last_checked = ?, tariff_last_updated = ?, url = ?, link_text = ?
                 WHERE id = ?
-            """, (pdf_hash, now, tariff_last_updated, existing[0]))
+            """, (pdf_hash, now, tariff_last_updated, url, link_text, existing[0]))
             logger.info("Updated existing record with new hash")
         else:
             cursor.execute("""
@@ -214,9 +218,9 @@ def update_database(utility_name, url, document_name, pdf_hash, last_modified):
 
         # Insert new
         cursor.execute("""
-            INSERT INTO tariff_documents (utility_name, url, document_name, hash, last_checked, tariff_last_updated, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE')
-        """, (utility_name, url, document_name, pdf_hash, now, tariff_last_updated))
+            INSERT INTO tariff_documents (utility_name, url, document_name, hash, last_checked, tariff_last_updated, status, link_text)
+            VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?)
+        """, (utility_name, url, document_name, pdf_hash, now, tariff_last_updated, link_text))
         logger.info("Inserted new record")
 
     conn.commit()
@@ -252,12 +256,22 @@ def process_seed_url(seed_url):
         logger.error(f"No URL selected by LLM for {seed_url}")
         return
 
+    # Find the link text for the selected URL
+    link_text = None
+    for link in links:
+        if link['url'] == best_url:
+            link_text = link['text']
+            break
+    if not link_text:
+        logger.warning(f"Link text not found for selected URL: {best_url}")
+        link_text = ""
+
     pdf_hash, document_name, last_modified = download_and_hash_pdf(best_url)
     if not pdf_hash:
         logger.error(f"Failed to download or hash PDF for {seed_url}")
         return
 
-    update_database(utility_name, best_url, document_name, pdf_hash, last_modified)
+    update_database(utility_name, best_url, document_name, pdf_hash, last_modified, link_text)
     logger.info(f"Completed processing for {seed_url}")
 
 def main():
