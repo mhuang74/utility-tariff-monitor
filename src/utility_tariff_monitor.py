@@ -8,6 +8,7 @@ from datetime import datetime
 from urllib.parse import urlparse, urlunparse
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from email.utils import parsedate_to_datetime
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
@@ -36,7 +37,7 @@ def setup_database():
             document_name TEXT,
             hash TEXT,
             last_checked DATETIME,
-            last_updated DATETIME,
+            tariff_last_updated DATETIME,
             status TEXT
         )
     ''')
@@ -152,23 +153,36 @@ def download_and_hash_pdf(url):
         response.raise_for_status()
         if 'application/pdf' not in response.headers.get('content-type', ''):
             logger.error("Downloaded content is not a PDF")
-            return None, None
+            return None, None, None
 
         content = response.content
         pdf_hash = hashlib.sha256(content).hexdigest()
         document_name = url.split('/')[-1] or "unknown.pdf"
+
+        # Parse Last-Modified header
+        last_modified = None
+        if 'Last-Modified' in response.headers:
+            try:
+                last_modified = parsedate_to_datetime(response.headers['Last-Modified'])
+                logger.info(f"Last-Modified header found: {last_modified}")
+            except Exception as e:
+                logger.warning(f"Failed to parse Last-Modified header: {e}")
+
         logger.info(f"PDF downloaded, hash: {pdf_hash}")
-        return pdf_hash, document_name
+        return pdf_hash, document_name, last_modified
     except requests.RequestException as e:
         logger.error(f"Error downloading PDF: {e}")
-        return None, None
+        return None, None, None
 
-def update_database(utility_name, url, document_name, pdf_hash):
+def update_database(utility_name, url, document_name, pdf_hash, last_modified):
     """Update or insert record in database."""
     logger.info("Updating database...")
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     now = datetime.now()
+
+    # Determine tariff_last_updated value
+    tariff_last_updated = last_modified if last_modified else now
 
     # Check if URL exists
     cursor.execute("SELECT id, hash FROM tariff_documents WHERE utility_name = ? AND url = ?", (utility_name, url))
@@ -179,17 +193,17 @@ def update_database(utility_name, url, document_name, pdf_hash):
         if existing[1] != pdf_hash:
             cursor.execute("""
                 UPDATE tariff_documents
-                SET hash = ?, last_checked = ?, last_updated = ?
+                SET hash = ?, last_checked = ?, tariff_last_updated = ?
                 WHERE id = ?
-            """, (pdf_hash, now, now, existing[0]))
-            logger.info("Updated existing record")
+            """, (pdf_hash, now, tariff_last_updated, existing[0]))
+            logger.info("Updated existing record with new hash")
         else:
             cursor.execute("""
                 UPDATE tariff_documents
                 SET last_checked = ?
                 WHERE id = ?
             """, (now, existing[0]))
-            logger.info("No changes detected")
+            logger.info("No changes detected, only updated last_checked")
     else:
         # Mark existing as obsolete
         cursor.execute("""
@@ -200,9 +214,9 @@ def update_database(utility_name, url, document_name, pdf_hash):
 
         # Insert new
         cursor.execute("""
-            INSERT INTO tariff_documents (utility_name, url, document_name, hash, last_checked, last_updated, status)
+            INSERT INTO tariff_documents (utility_name, url, document_name, hash, last_checked, tariff_last_updated, status)
             VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE')
-        """, (utility_name, url, document_name, pdf_hash, now, now))
+        """, (utility_name, url, document_name, pdf_hash, now, tariff_last_updated))
         logger.info("Inserted new record")
 
     conn.commit()
@@ -238,12 +252,12 @@ def process_seed_url(seed_url):
         logger.error(f"No URL selected by LLM for {seed_url}")
         return
 
-    pdf_hash, document_name = download_and_hash_pdf(best_url)
+    pdf_hash, document_name, last_modified = download_and_hash_pdf(best_url)
     if not pdf_hash:
         logger.error(f"Failed to download or hash PDF for {seed_url}")
         return
 
-    update_database(utility_name, best_url, document_name, pdf_hash)
+    update_database(utility_name, best_url, document_name, pdf_hash, last_modified)
     logger.info(f"Completed processing for {seed_url}")
 
 def main():
