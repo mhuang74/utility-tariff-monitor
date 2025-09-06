@@ -1,0 +1,11 @@
+Create a Python script with the following objective: identify the PDF document that we want from a website, and determine whether it has changed.
+
+Reach the objective using the folowing steps:
+- retrieve all Link Text and Link URL from `https://austinenergy.com/rates/approved-rates-schedules`
+- using LangChain/LLM, determine the most likely URL which contains PDF document of Electric Utility Commercial Tariff Rates
+- compute a unique Hash for the document and store it in a file-based SQLite database along with other metadata like Utility Name, URL, Document Name, Hash, Last Checked, Last Updated, Status.
+- when the script next runs, it should check the database to see if the best URL found matches up with existing record for that Utility. If so, update the record. If not, insert new record with status of ACTIVE and mark existing records for that Utility as OBSOLETE.
+
+Print info traces at each step so I can follow the data flow.
+Also create an environment.txt file to import the needed libraries via conda.
+
