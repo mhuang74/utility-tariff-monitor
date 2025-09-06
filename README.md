@@ -2,7 +2,7 @@
 Monitor for updates to Electric Utility Tariff PDF documents
 
 
-## Get list of tariff has changed recently from iurdb
+## Utilities with recently changed commerical tariffs (from recent iurdb dump)
 
 ```
 cat sample_rates.json | ./extract_essential_iurdb_fields
