@@ -24,6 +24,22 @@ logger = logging.getLogger(__name__)
 # Constants
 DB_PATH = "./resources/tariff_monitor.db"
 
+# Centralized headers to mimic browser requests
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'DNT': '1',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Cache-Control': 'max-age=0',
+}
+
 def setup_database():
     """Initialize the SQLite database and create table if not exists."""
     logger.info("Setting up database...")
@@ -68,15 +84,7 @@ def scrape_links(url):
     """Scrape all PDF links from the given URL."""
     logger.info(f"Scraping links from {url}")
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-        }
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=HEADERS, timeout=10)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
         links = []
@@ -100,9 +108,10 @@ def scrape_links(url):
 
                 parsed = urlparse(full_url)
                 clean_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
-                logger.info(f"Cleaned Potential Tariff PDF URL: {clean_url}")
+                link_text = a.get_text(strip=True)
+                logger.info(f"PDF LINK: {link_text} => {clean_url}")
                 links.append({
-                    'text': a.get_text(strip=True),
+                    'text': link_text,
                     'url': clean_url
                 })
         logger.info(f"Found {len(links)} PDF links")
@@ -146,11 +155,10 @@ def download_and_hash_pdf(url):
     """Download PDF and compute hash."""
     logger.info(f"Downloading PDF from {url}")
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'application/pdf,*/*',
-        }
-        response = requests.get(url, headers=headers, timeout=30)
+        # Use centralized headers but modify Accept for PDF downloads
+        pdf_headers = HEADERS.copy()
+        pdf_headers['Accept'] = 'application/pdf,*/*'
+        response = requests.get(url, headers=pdf_headers, timeout=30)
         response.raise_for_status()
         if 'application/pdf' not in response.headers.get('content-type', ''):
             logger.error("Downloaded content is not a PDF")
@@ -310,10 +318,7 @@ def get_pdf_last_modified(url):
     """Fetch Last-Modified header from PDF URL using HEAD request."""
     logger.info(f"Fetching Last-Modified header from {url}")
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        }
-        response = requests.head(url, headers=headers, timeout=10)
+        response = requests.head(url, headers=HEADERS, timeout=10)
         response.raise_for_status()
 
         if 'Last-Modified' in response.headers:
