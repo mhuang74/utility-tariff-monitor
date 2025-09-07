@@ -347,7 +347,15 @@ def find_existing_document(utility_name, url, link_text):
 
     if existing:
         logger.info(f"Found existing document with tariff_last_updated: {existing[1]}")
-        return existing[1]  # Return the tariff_last_updated timestamp
+        # Parse the datetime string from database back to datetime object
+        if existing[1]:
+            try:
+                return datetime.fromisoformat(existing[1])
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Failed to parse tariff_last_updated from database: {e}")
+                return None
+        else:
+            return None
     else:
         logger.info("No existing document found")
         return None
