@@ -5,7 +5,7 @@ import hashlib
 import requests
 import argparse
 from datetime import datetime
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from email.utils import parsedate_to_datetime
@@ -107,7 +107,11 @@ def scrape_links(url):
                     full_url = f"{base_url}/{href}"
 
                 parsed = urlparse(full_url)
-                clean_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
+                # Selectively strip query parameters that cause cache misses
+                query_params = parse_qs(parsed.query)
+                filtered_params = {k: v for k, v in query_params.items() if k.lower() not in ['rev', 'hash']}
+                new_query = urlencode(filtered_params, doseq=True)
+                clean_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
                 link_text = a.get_text(strip=True)
                 logger.info(f"PDF LINK: {link_text} => {clean_url}")
                 links.append({
@@ -125,7 +129,7 @@ def select_best_url_with_llm(links):
     logger.info("Using LLM to select best URL...")
     if not GOOGLE_API_KEY:
         logger.error("GOOGLE_API_KEY not found in environment")
-        return None
+        raise ValueError("GOOGLE_API_KEY not found in environment")
 
     try:
         llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=GOOGLE_API_KEY)
@@ -135,7 +139,8 @@ def select_best_url_with_llm(links):
             Analyze the following list of PDF links and their text descriptions.
             Identify the most likely URL that contains the Electric Utility Commercial Tariff Rates document.
             Look for keywords like "commercial", "tariff", "rates", "schedule", etc.
-            Return only the URL of the best match, nothing else.
+            If you cannot determine a suitable URL, return exactly 'NO_URL_FOUND'.
+            Otherwise, return only the URL of the best match, nothing else.
 
             Links:
             {links}
@@ -146,10 +151,18 @@ def select_best_url_with_llm(links):
         result = chain.run(links=links_text)
         selected_url = result.strip()
         logger.info(f"LLM selected URL: {selected_url}")
+        
+        if selected_url == "NO_URL_FOUND":
+            raise ValueError("LLM could not determine a suitable URL from the provided links")
+        
+        if not selected_url.startswith("http"):
+            logger.error(f"LLM returned invalid URL: {selected_url}")
+            raise ValueError("LLM returned an invalid URL format")
+        
         return selected_url
     except Exception as e:
         logger.error(f"Error with LLM: {e}")
-        return None
+        raise
 
 def download_and_hash_pdf(url):
     """Download PDF and compute hash."""
@@ -262,9 +275,6 @@ def process_seed_url(seed_url, quick_mode=False):
         return
 
     best_url = select_best_url_with_llm(links)
-    if not best_url:
-        logger.error(f"No URL selected by LLM for {seed_url}")
-        return
 
     # Find the link text for the selected URL
     link_text = None
