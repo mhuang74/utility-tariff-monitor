@@ -179,6 +179,8 @@ def select_best_url_with_llm(links):
             Analyze the following list of PDF links, their text descriptions, and contextual information from the webpage.
             Identify all URLs that contain Electric Utility Commercial Tariff Rates documents.
             Look for keywords like "commercial", "general service", "electrical service", "tariff", "rates", "schedule", etc. in the text, context, and URL.
+            If multiple tariffs are available, select one approved tariff from the current year.
+            If multiple Utility Companies are listed, return one tariff for each Utility.
             Use the context to understand the hierarchical structure and relevance of each link.
 
             IMPORTANT: Your response must be ONLY a valid JSON array. Do not include any explanations, comments, or additional text.
@@ -192,12 +194,12 @@ def select_best_url_with_llm(links):
             Example response format (return ONLY the JSON, nothing else):
             [
                 {{
-                    "url": "https://example.com/tariff.pdf",
-                    "rationale": "Contains commercial electrical service rates and schedules"
+                    "url": "https://example.com/abc_tariff.pdf",
+                    "rationale": "Contains commercial electrical service rates for Utility ABC"
                 }},
                 {{
-                    "url": "https://example.com/rates.pdf",
-                    "rationale": "General service tariff document with commercial rates"
+                    "url": "https://example.com/xyz_tariff.pdf",
+                    "rationale": "General service tariff document with commercial rates for Utility XYZ"
                 }}
             ]
 
