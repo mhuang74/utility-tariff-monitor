@@ -279,7 +279,7 @@ def download_and_hash_pdf(url):
         # Use centralized headers but modify Accept for PDF downloads
         pdf_headers = HEADERS.copy()
         pdf_headers['Accept'] = 'application/pdf,*/*'
-        response = requests.get(url, headers=pdf_headers, timeout=30)
+        response = requests.get(url, headers=pdf_headers, timeout=120)
         response.raise_for_status()
         if 'application/pdf' not in response.headers.get('content-type', ''):
             logger.error("Downloaded content is not a PDF")
@@ -419,8 +419,8 @@ def process_seed_url(seed_url, quick_mode=False):
                 # Fetch current Last-Modified header
                 current_last_modified = get_pdf_last_modified(current_url)
                 if current_last_modified:
-                    # Compare timestamps (considering them equal if within 1 second)
-                    if abs((current_last_modified - existing_last_modified).total_seconds()) < 1:
+                    # Compare timestamps (considering them equal if they are on the same date)
+                    if current_last_modified.date() == existing_last_modified.date():
                         logger.info("PDF has not changed (Last-Modified matches). Skipping download.")
                         # Update last_checked timestamp
                         conn = sqlite3.connect(DB_PATH)
