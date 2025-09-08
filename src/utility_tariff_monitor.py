@@ -165,8 +165,8 @@ def scrape_links(url):
         return []
 
 def select_best_url_with_llm(links):
-    """Use LLM to select the most likely URL for commercial tariff rates."""
-    logger.info("Using LLM to select best URL...")
+    """Use LLM to select URLs for commercial tariff rates and return with rationales."""
+    logger.info("Using LLM to select best URLs...")
     if not GOOGLE_API_KEY:
         logger.error("GOOGLE_API_KEY not found in environment")
         raise ValueError("GOOGLE_API_KEY not found in environment")
@@ -177,11 +177,29 @@ def select_best_url_with_llm(links):
             input_variables=["links"],
             template="""
             Analyze the following list of PDF links, their text descriptions, and contextual information from the webpage.
-            Identify the most likely URL that contains the Electric Utility Commercial Tariff Rates document.
+            Identify all URLs that contain Electric Utility Commercial Tariff Rates documents.
             Look for keywords like "commercial", "general service", "electrical service", "tariff", "rates", "schedule", etc. in the text, context, and URL.
             Use the context to understand the hierarchical structure and relevance of each link.
-            Return only the URL of the best match. If there are best match for multiple utility companies, return the first one.
-            If no suitable URL is found, return exactly: NO_URL_FOUND
+
+            IMPORTANT: Your response must be ONLY a valid JSON array. Do not include any explanations, comments, or additional text.
+
+            Return a JSON array where each element is an object with:
+            - "url": the URL of the tariff document
+            - "rationale": brief explanation of why this URL was selected
+
+            If no suitable URLs are found, return an empty array: []
+
+            Example response format (return ONLY the JSON, nothing else):
+            [
+                {{
+                    "url": "https://example.com/tariff.pdf",
+                    "rationale": "Contains commercial electrical service rates and schedules"
+                }},
+                {{
+                    "url": "https://example.com/rates.pdf",
+                    "rationale": "General service tariff document with commercial rates"
+                }}
+            ]
 
             Links:
             {links}
@@ -190,17 +208,64 @@ def select_best_url_with_llm(links):
         chain = LLMChain(llm=llm, prompt=prompt)
         links_text = "\n".join([f"Text: {link['text']}\nContext: {link['context']}\nURL: {link['url']}" for link in links])
         result = chain.run(links=links_text)
-        selected_url = result.strip()
-        logger.info(f"LLM selected URL: {selected_url}")
-        
-        if selected_url == "NO_URL_FOUND":
-            raise ValueError("LLM could not determine a suitable URL from the provided links")
-        
-        if not selected_url.startswith("http"):
-            logger.error(f"LLM returned invalid URL: {selected_url}")
-            raise ValueError("LLM returned an invalid URL format")
-        
-        return selected_url
+        result = result.strip()
+
+        # Parse JSON response - handle markdown code blocks
+        import json
+        import re
+
+        # Extract JSON from markdown code blocks if present
+        json_match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', result, re.DOTALL)
+        if json_match:
+            json_content = json_match.group(1)
+        else:
+            # Try to find JSON array directly
+            json_match = re.search(r'(\[.*\])', result, re.DOTALL)
+            if json_match:
+                json_content = json_match.group(1)
+            else:
+                json_content = result
+
+        try:
+            selected_urls = json.loads(json_content)
+            if not isinstance(selected_urls, list):
+                raise ValueError("LLM response is not a JSON array")
+        except json.JSONDecodeError as e:
+            # Check if the response contains "NO_URL_FOUND" or similar
+            if "NO_URL_FOUND" in result.upper() or "no suitable" in result.lower():
+                logger.info("LLM indicated no suitable URLs found")
+                return []
+            else:
+                logger.error(f"Failed to parse LLM response as JSON. Raw response: {result}")
+                logger.error(f"Extracted JSON content: {json_content}")
+                raise ValueError(f"LLM returned invalid JSON: {e}")
+
+        logger.info(f"LLM selected {len(selected_urls)} URLs")
+
+        # Validate URLs
+        valid_urls = []
+        for item in selected_urls:
+            if isinstance(item, dict) and 'url' in item and 'rationale' in item:
+                url = item['url'].strip()
+                if url.startswith("http"):
+                    valid_urls.append({
+                        'url': url,
+                        'rationale': item['rationale']
+                    })
+                else:
+                    logger.warning(f"Invalid URL format: {url}")
+            else:
+                logger.warning(f"Invalid item format: {item}")
+
+        if not valid_urls:
+            logger.warning("No valid URLs found in LLM response")
+            return []
+
+        # Log selected URLs with rationales
+        for item in valid_urls:
+            logger.info(f"Selected URL: {item['url']} | Rationale: {item['rationale']}")
+
+        return valid_urls
     except Exception as e:
         logger.error(f"Error with LLM: {e}")
         raise
@@ -315,55 +380,76 @@ def process_seed_url(seed_url, quick_mode=False):
         logger.error(f"No links found for {seed_url}")
         return
 
-    best_url = select_best_url_with_llm(links)
+    selected_urls = select_best_url_with_llm(links)
 
-    # Find the link text for the selected URL
-    link_text = None
-    for link in links:
-        if link['url'] == best_url:
-            link_text = link['text']
-            break
-    if not link_text:
-        logger.warning(f"Link text not found for selected URL: {best_url}")
-        link_text = ""
-
-    # Quick mode logic
-    if quick_mode:
-        logger.info("Quick mode: Checking for existing document...")
-        existing_last_modified = find_existing_document(utility_name, best_url, link_text)
-        if existing_last_modified:
-            # Fetch current Last-Modified header
-            current_last_modified = get_pdf_last_modified(best_url)
-            if current_last_modified:
-                # Compare timestamps (considering them equal if within 1 second)
-                if abs((current_last_modified - existing_last_modified).total_seconds()) < 1:
-                    logger.info("PDF has not changed (Last-Modified matches). Skipping download.")
-                    # Update last_checked timestamp
-                    conn = sqlite3.connect(DB_PATH)
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        UPDATE tariff_documents
-                        SET last_checked = ?
-                        WHERE utility_name = ? AND (url = ? OR link_text = ?) AND status = 'ACTIVE'
-                    """, (datetime.now(), utility_name, best_url, link_text))
-                    conn.commit()
-                    conn.close()
-                    logger.info(f"Completed processing for {seed_url} (quick mode - no changes)")
-                    return
-                else:
-                    logger.info("PDF has been modified. Proceeding with download.")
-            else:
-                logger.warning("Could not fetch Last-Modified header. Proceeding with download.")
-        else:
-            logger.info("No existing document found. Proceeding with download.")
-
-    pdf_hash, document_name, last_modified = download_and_hash_pdf(best_url)
-    if not pdf_hash:
-        logger.error(f"Failed to download or hash PDF for {seed_url}")
+    if not selected_urls:
+        logger.warning(f"No URLs selected by LLM for {seed_url}")
         return
 
-    update_database(utility_name, best_url, document_name, pdf_hash, last_modified, link_text)
-    logger.info(f"Completed processing for {seed_url}")
+    logger.info(f"Processing {len(selected_urls)} selected URLs for {seed_url}")
+
+    # Process each selected URL
+    for i, url_info in enumerate(selected_urls, 1):
+        current_url = url_info['url']
+        rationale = url_info['rationale']
+
+        logger.info(f"{'-'*40}")
+        logger.info(f"PROCESSING URL {i}/{len(selected_urls)}: {current_url}")
+        logger.info(f"Rationale: {rationale}")
+        logger.info(f"{'-'*40}")
+
+        # Find the link text for the current URL
+        link_text = None
+        for link in links:
+            if link['url'] == current_url:
+                link_text = link['text']
+                break
+        if not link_text:
+            logger.warning(f"Link text not found for selected URL: {current_url}")
+            link_text = ""
+
+        # Quick mode logic for each URL
+        skip_download = False
+        if quick_mode:
+            logger.info("Quick mode: Checking for existing document...")
+            existing_last_modified = find_existing_document(utility_name, current_url, link_text)
+            if existing_last_modified:
+                # Fetch current Last-Modified header
+                current_last_modified = get_pdf_last_modified(current_url)
+                if current_last_modified:
+                    # Compare timestamps (considering them equal if within 1 second)
+                    if abs((current_last_modified - existing_last_modified).total_seconds()) < 1:
+                        logger.info("PDF has not changed (Last-Modified matches). Skipping download.")
+                        # Update last_checked timestamp
+                        conn = sqlite3.connect(DB_PATH)
+                        cursor = conn.cursor()
+                        cursor.execute("""
+                            UPDATE tariff_documents
+                            SET last_checked = ?
+                            WHERE utility_name = ? AND (url = ? OR link_text = ?) AND status = 'ACTIVE'
+                        """, (datetime.now(), utility_name, current_url, link_text))
+                        conn.commit()
+                        conn.close()
+                        logger.info(f"Completed processing URL {i} (quick mode - no changes)")
+                        skip_download = True
+                    else:
+                        logger.info("PDF has been modified. Proceeding with download.")
+                else:
+                    logger.warning("Could not fetch Last-Modified header. Proceeding with download.")
+            else:
+                logger.info("No existing document found. Proceeding with download.")
+
+        if not skip_download:
+            pdf_hash, document_name, last_modified = download_and_hash_pdf(current_url)
+            if not pdf_hash:
+                logger.error(f"Failed to download or hash PDF for URL {i}: {current_url}")
+                continue
+
+            update_database(utility_name, current_url, document_name, pdf_hash, last_modified, link_text)
+
+        logger.info(f"Completed processing URL {i}/{len(selected_urls)}: {current_url}")
+
+    logger.info(f"Completed processing all {len(selected_urls)} URLs for {seed_url}")
 
 def get_pdf_last_modified(url):
     """Fetch Last-Modified header from PDF URL using HEAD request."""
