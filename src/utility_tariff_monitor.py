@@ -80,6 +80,44 @@ def read_seed_urls(input_file):
         logger.error(f"Error reading input file: {e}")
         return []
 
+def extract_link_context(a_tag):
+    """Extract contextual text for a link by traversing the DOM tree."""
+    context_parts = []
+    link_text = a_tag.get_text(strip=True)
+    context_parts.append(link_text)
+
+    current = a_tag.parent
+    max_levels = 3
+    for level in range(max_levels):
+        if not current:
+            break
+
+        # Check preceding siblings for headings or paragraphs
+        prev_sib = current.previous_sibling
+        while prev_sib:
+            if prev_sib.name in ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                sib_text = prev_sib.get_text(strip=True)
+                if sib_text and len(sib_text) > 5:  # Avoid very short texts
+                    context_parts.insert(0, sib_text)
+                    break  # Take the first relevant sibling
+            prev_sib = prev_sib.previous_sibling
+
+        # Move to parent
+        current = current.parent
+
+    # Combine and truncate to reasonable length
+    full_context = ' '.join(context_parts)
+    if len(full_context) > 500:
+        full_context = full_context[:500] + '...'
+    elif len(full_context) < 30:
+        # If too short, try to get more from parent's text
+        if a_tag.parent:
+            parent_text = a_tag.parent.get_text(strip=True)
+            if len(parent_text) > len(full_context):
+                full_context = parent_text[:500] if len(parent_text) > 500 else parent_text
+
+    return full_context
+
 def scrape_links(url):
     """Scrape all PDF links from the given URL."""
     logger.info(f"Scraping links from {url}")
@@ -113,10 +151,12 @@ def scrape_links(url):
                 new_query = urlencode(filtered_params, doseq=True)
                 clean_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
                 link_text = a.get_text(strip=True)
-                logger.info(f"PDF LINK: {link_text} => {clean_url}")
+                context = extract_link_context(a)
+                logger.info(f"PDF LINK: {link_text} | Context: {context} | URL: {clean_url}")
                 links.append({
                     'text': link_text,
-                    'url': clean_url
+                    'url': clean_url,
+                    'context': context
                 })
         logger.info(f"Found {len(links)} PDF links")
         return links
@@ -136,18 +176,19 @@ def select_best_url_with_llm(links):
         prompt = PromptTemplate(
             input_variables=["links"],
             template="""
-            Analyze the following list of PDF links and their text descriptions.
+            Analyze the following list of PDF links, their text descriptions, and contextual information from the webpage.
             Identify the most likely URL that contains the Electric Utility Commercial Tariff Rates document.
-            Look for keywords like "commercial", "tariff", "rates", "schedule", etc.
-            If you cannot determine a suitable URL, return exactly 'NO_URL_FOUND'.
-            Otherwise, return only the URL of the best match, nothing else.
+            Look for keywords like "commercial", "general service", "electrical service", "tariff", "rates", "schedule", etc. in the text, context, and URL.
+            Use the context to understand the hierarchical structure and relevance of each link.
+            Return only the URL of the best match. If there are best match for multiple utility companies, return the first one.
+            If no suitable URL is found, return exactly: NO_URL_FOUND
 
             Links:
             {links}
             """
         )
         chain = LLMChain(llm=llm, prompt=prompt)
-        links_text = "\n".join([f"Text: {link['text']}\nURL: {link['url']}" for link in links])
+        links_text = "\n".join([f"Text: {link['text']}\nContext: {link['context']}\nURL: {link['url']}" for link in links])
         result = chain.run(links=links_text)
         selected_url = result.strip()
         logger.info(f"LLM selected URL: {selected_url}")
