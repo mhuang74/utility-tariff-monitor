@@ -178,7 +178,8 @@ def select_best_url_with_llm(links):
             template="""
             Analyze the following list of PDF links, their text descriptions, and contextual information from the webpage.
             Identify all URLs that contain Electric Utility Commercial Tariff Rates documents.
-            Look for keywords like "commercial", "general service", "electrical service", "tariff", "rates", "schedule", etc. in the text, context, and URL.
+            Look for keywords like "commercial", "general service", "standard rates", "electrical service", "tariff", "rates", "fees", "charges", "schedule" in the text, context, and URL.
+            Similarly, avoid keywords like "residential", "industrial", "wholesale", "transmission", "school", "church", "municipal", "large power".
             If multiple tariffs are available, select one approved tariff from the current year.
             If multiple Utility Companies are listed, return one tariff for each Utility.
             Use the context to understand the hierarchical structure and relevance of each link.
@@ -211,6 +212,9 @@ def select_best_url_with_llm(links):
         links_text = "\n".join([f"Text: {link['text']}\nContext: {link['context']}\nURL: {link['url']}" for link in links])
         result = chain.run(links=links_text)
         result = result.strip()
+
+        logger.info(">> LLM Response")
+        logger.info(result)
 
         # Parse JSON response - handle markdown code blocks
         import json
@@ -382,7 +386,10 @@ def process_seed_url(seed_url, quick_mode=False):
         logger.error(f"No links found for {seed_url}")
         return
 
-    selected_urls = select_best_url_with_llm(links)
+    if len(links) == 1:
+        selected_urls = links[0]
+    elif len(links) > 1:
+        selected_urls = select_best_url_with_llm(links)
 
     if not selected_urls:
         logger.warning(f"No URLs selected by LLM for {seed_url}")
