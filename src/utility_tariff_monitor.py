@@ -178,7 +178,7 @@ def select_best_url_with_llm(links):
             template="""
             Analyze the following list of PDF links, their text descriptions, and contextual information from the webpage.
             Identify all URLs that contain Electric Utility Commercial Tariff Rates documents.
-            Look for keywords like "commercial", "general service", "standard rates", "electrical service", "electric service", "tariff", "rates", "fees", "charges", "fees & charges", "schedule" in the text, context, and URL.
+            Look for keywords like "commercial", "retail", "general service", "standard rates", "electrical service", "electric service", "tariff", "rates", "fees", "charges", "fees & charges", "schedule" in the text, context, and URL.
             Similarly, avoid keywords like "residential", "industrial", "wholesale", "transmission", "school", "church", "municipal", "large power".
             If multiple tariffs are available, select one approved tariff from the current year.
             If multiple Utility Companies are listed, return one tariff for each Utility.
@@ -666,6 +666,8 @@ def generate_report(all_report_data, input_file_path):
 
         for i, seed_data in enumerate(all_report_data, 1):
             utility_name = seed_data['utility_name']
+            # Create anchor link for the utility name
+            anchor = utility_name.lower().replace(' ', '-').replace('.', '').replace('/', '')
             pdfs_found = seed_data['potential_urls_found']
             llm_selections = seed_data['llm_selections']
             llm_response = seed_data['llm_selection_response'][:50] + "..." if len(seed_data['llm_selection_response']) > 50 else seed_data['llm_selection_response']
@@ -673,13 +675,16 @@ def generate_report(all_report_data, input_file_path):
             records_updated = seed_data['records_updated']
             errors = seed_data['errors_encountered']
 
-            f.write(f"| {i} | {utility_name} | {pdfs_found} | {llm_selections} | {llm_response} | {records_added} | {records_updated} | {errors} |\n")
+            f.write(f"| {i} | [{utility_name}](#{anchor}) | {pdfs_found} | {llm_selections} | {llm_response} | {records_added} | {records_updated} | {errors} |\n")
 
         # Part 2: Detailed Information
         f.write("\n## Detailed Information\n\n")
 
         for i, seed_data in enumerate(all_report_data, 1):
-            f.write(f"### Seed URL {i}: {seed_data['utility_name']} - {seed_data['seed_url']}\n\n")
+            utility_name = seed_data['utility_name']
+            # Create anchor for this section
+            anchor = utility_name.lower().replace(' ', '-').replace('.', '').replace('/', '')
+            f.write(f"### <a id=\"{anchor}\"></a>Seed URL {i}: {seed_data['utility_name']} - {seed_data['seed_url']}\n\n")
             f.write(f"**Potential PDF URLs Found:** {seed_data['potential_urls_found']}\n\n")
             f.write(f"**LLM Selections:** {seed_data['llm_selections']}\n\n")
             f.write(f"**LLM Selection Response:** {seed_data['llm_selection_response']}\n\n")
