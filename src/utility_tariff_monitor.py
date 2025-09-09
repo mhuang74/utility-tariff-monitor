@@ -178,7 +178,7 @@ def select_best_url_with_llm(links):
             template="""
             Analyze the following list of PDF links, their text descriptions, and contextual information from the webpage.
             Identify all URLs that contain Electric Utility Commercial Tariff Rates documents.
-            Look for keywords like "commercial", "general service", "standard rates", "electrical service", "tariff", "rates", "fees", "charges", "schedule" in the text, context, and URL.
+            Look for keywords like "commercial", "general service", "standard rates", "electrical service", "electric service", "tariff", "rates", "fees", "charges", "fees & charges", "schedule" in the text, context, and URL.
             Similarly, avoid keywords like "residential", "industrial", "wholesale", "transmission", "school", "church", "municipal", "large power".
             If multiple tariffs are available, select one approved tariff from the current year.
             If multiple Utility Companies are listed, return one tariff for each Utility.
@@ -311,57 +311,64 @@ def download_and_hash_pdf(url):
 def update_database(utility_name, url, document_name, pdf_hash, last_modified, link_text):
     """Update or insert record in database."""
     logger.info("Updating database...")
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    now = datetime.now()
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        now = datetime.now()
 
-    # Determine tariff_last_updated value
-    tariff_last_updated = last_modified if last_modified else now
+        # Determine tariff_last_updated value
+        tariff_last_updated = last_modified if last_modified else now
 
-    # Fuzzy match: check if record exists based on hash, url, or link_text
-    cursor.execute("""
-        SELECT id, hash FROM tariff_documents
-        WHERE utility_name = ? AND (hash = ? OR url = ? OR link_text = ?)
-    """, (utility_name, pdf_hash, url, link_text))
-    existing = cursor.fetchone()
+        # Fuzzy match: check if record exists based on hash, url, or link_text
+        cursor.execute("""
+            SELECT id, hash FROM tariff_documents
+            WHERE utility_name = ? AND (hash = ? OR url = ? OR link_text = ?)
+        """, (utility_name, pdf_hash, url, link_text))
+        existing = cursor.fetchone()
 
-    if existing:
-        # Update existing
-        if existing[1] != pdf_hash:
-            cursor.execute("""
-                UPDATE tariff_documents
-                SET hash = ?, last_checked = ?, tariff_last_updated = ?, url = ?, link_text = ?
-                WHERE id = ?
-            """, (pdf_hash, now, tariff_last_updated, url, link_text, existing[0]))
-            logger.info("Updated existing record with new hash")
-            status = "UPDATED"
+        if existing:
+            # Update existing
+            if existing[1] != pdf_hash:
+                cursor.execute("""
+                    UPDATE tariff_documents
+                    SET hash = ?, last_checked = ?, tariff_last_updated = ?, url = ?, link_text = ?
+                    WHERE id = ?
+                """, (pdf_hash, now, tariff_last_updated, url, link_text, existing[0]))
+                logger.info("Updated existing record with new hash")
+                status = "UPDATED"
+            else:
+                cursor.execute("""
+                    UPDATE tariff_documents
+                    SET last_checked = ?
+                    WHERE id = ?
+                """, (now, existing[0]))
+                logger.info("No changes detected, only updated last_checked")
+                status = "NO CHANGE"
         else:
+            # Mark existing as obsolete
             cursor.execute("""
                 UPDATE tariff_documents
-                SET last_checked = ?
-                WHERE id = ?
-            """, (now, existing[0]))
-            logger.info("No changes detected, only updated last_checked")
-            status = "NO CHANGE"
-    else:
-        # Mark existing as obsolete
-        cursor.execute("""
-            UPDATE tariff_documents
-            SET status = 'OBSOLETE'
-            WHERE utility_name = ? AND status = 'ACTIVE'
-        """, (utility_name,))
+                SET status = 'OBSOLETE'
+                WHERE utility_name = ? AND status = 'ACTIVE'
+            """, (utility_name,))
 
-        # Insert new
-        cursor.execute("""
-            INSERT INTO tariff_documents (utility_name, url, document_name, hash, last_checked, tariff_last_updated, status, link_text)
-            VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?)
-        """, (utility_name, url, document_name, pdf_hash, now, tariff_last_updated, link_text))
-        logger.info("Inserted new record")
-        status = "ADDED"
+            # Insert new
+            cursor.execute("""
+                INSERT INTO tariff_documents (utility_name, url, document_name, hash, last_checked, tariff_last_updated, status, link_text)
+                VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?)
+            """, (utility_name, url, document_name, pdf_hash, now, tariff_last_updated, link_text))
+            logger.info("Inserted new record")
+            status = "ADDED"
 
-    conn.commit()
-    conn.close()
-    return status, tariff_last_updated
+        conn.commit()
+        return status, tariff_last_updated
+    except sqlite3.Error as e:
+        logger.error(f"Database error in update_database: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 def get_utility_name_from_url(url):
     """Derive utility name from URL domain."""
@@ -461,47 +468,66 @@ def process_seed_url(seed_url, quick_mode=False):
         document_changed = False
         db_status = "N/A"
         last_modified = "N/A"
+        error_detail = None
 
         # Quick mode logic for each URL
         skip_download = False
         if quick_mode:
             logger.info("Quick mode: Checking for existing document...")
-            existing_last_modified = find_existing_document(utility_name, current_url, link_text)
-            if existing_last_modified:
-                # Fetch current Last-Modified header
-                current_last_modified = get_pdf_last_modified(current_url)
-                if current_last_modified:
-                    # Compare timestamps (considering them equal if they are on the same date)
-                    if current_last_modified.date() == existing_last_modified.date():
-                        logger.info("PDF has not changed (Last-Modified matches). Skipping download.")
-                        # Update last_checked timestamp
-                        conn = sqlite3.connect(DB_PATH)
-                        cursor = conn.cursor()
-                        cursor.execute("""
-                            UPDATE tariff_documents
-                            SET last_checked = ?
-                            WHERE utility_name = ? AND (url = ? OR link_text = ?) AND status = 'ACTIVE'
-                        """, (datetime.now(), utility_name, current_url, link_text))
-                        conn.commit()
-                        conn.close()
-                        logger.info(f"Completed processing URL {i} (quick mode - no changes)")
-                        skip_download = True
-                        document_changed = False
-                        db_status = "NO CHANGE"
-                        last_modified = existing_last_modified.strftime('%Y-%m-%d %H:%M:%S') if existing_last_modified else "N/A"
+            try:
+                existing_last_modified = find_existing_document(utility_name, current_url, link_text)
+                if existing_last_modified:
+                    # Fetch current Last-Modified header
+                    current_last_modified = get_pdf_last_modified(current_url)
+                    if current_last_modified:
+                        # Compare timestamps (considering them equal if they are on the same date)
+                        if current_last_modified.date() == existing_last_modified.date():
+                            logger.info("PDF has not changed (Last-Modified matches). Skipping download.")
+                            # Update last_checked timestamp
+                            conn = None
+                            try:
+                                conn = sqlite3.connect(DB_PATH)
+                                cursor = conn.cursor()
+                                cursor.execute("""
+                                    UPDATE tariff_documents
+                                    SET last_checked = ?
+                                    WHERE utility_name = ? AND (url = ? OR link_text = ?) AND status = 'ACTIVE'
+                                """, (datetime.now(), utility_name, current_url, link_text))
+                                conn.commit()
+                                logger.info(f"Completed processing URL {i} (quick mode - no changes)")
+                                skip_download = True
+                                document_changed = False
+                                db_status = "NO CHANGE"
+                                last_modified = existing_last_modified.strftime('%Y-%m-%d %H:%M:%S') if existing_last_modified else "N/A"
+                            except sqlite3.Error as e:
+                                logger.error(f"Database error updating last_checked for {current_url}: {e}")
+                                errors_encountered += 1
+                                error_detail = f"Database error: {str(e)}"
+                                skip_download = True  # Skip download but mark as error
+                                db_status = "DB ERROR"
+                                last_modified = "N/A"
+                            finally:
+                                if conn:
+                                    conn.close()
+                        else:
+                            logger.info("PDF has been modified. Proceeding with download.")
+                            document_changed = True
                     else:
-                        logger.info("PDF has been modified. Proceeding with download.")
+                        logger.warning("Could not fetch Last-Modified header. Proceeding with download.")
                         document_changed = True
                 else:
-                    logger.warning("Could not fetch Last-Modified header. Proceeding with download.")
+                    logger.info("No existing document found. Proceeding with download.")
                     document_changed = True
-            else:
-                logger.info("No existing document found. Proceeding with download.")
-                document_changed = True
-
-        error_detail = None
+            except Exception as e:
+                logger.error(f"Error in quick mode processing for {current_url}: {e}")
+                errors_encountered += 1
+                error_detail = f"Quick mode error: {str(e)}"
+                skip_download = True  # Skip download but mark as error
+                db_status = "ERROR"
+                last_modified = "N/A"
 
         if not skip_download:
+            error_detail = None
             pdf_hash, document_name, last_modified_raw, error_detail = download_and_hash_pdf(current_url)
             if not pdf_hash:
                 logger.error(f"Failed to download or hash PDF for URL {i}: {current_url}")
@@ -582,31 +608,38 @@ def get_pdf_last_modified(url):
 def find_existing_document(utility_name, url, link_text):
     """Find existing document in database using fuzzy match criteria."""
     logger.info("Checking for existing document in database...")
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
 
-    # Fuzzy match: check if record exists based on url or link_text
-    cursor.execute("""
-        SELECT id, tariff_last_updated FROM tariff_documents
-        WHERE utility_name = ? AND (url = ? OR link_text = ?) AND status = 'ACTIVE'
-    """, (utility_name, url, link_text))
-    existing = cursor.fetchone()
-    conn.close()
+        # Fuzzy match: check if record exists based on url or link_text
+        cursor.execute("""
+            SELECT id, tariff_last_updated FROM tariff_documents
+            WHERE utility_name = ? AND (url = ? OR link_text = ?) AND status = 'ACTIVE'
+        """, (utility_name, url, link_text))
+        existing = cursor.fetchone()
 
-    if existing:
-        logger.info(f"Found existing document with tariff_last_updated: {existing[1]}")
-        # Parse the datetime string from database back to datetime object
-        if existing[1]:
-            try:
-                return datetime.fromisoformat(existing[1])
-            except (ValueError, TypeError) as e:
-                logger.warning(f"Failed to parse tariff_last_updated from database: {e}")
+        if existing:
+            logger.info(f"Found existing document with tariff_last_updated: {existing[1]}")
+            # Parse the datetime string from database back to datetime object
+            if existing[1]:
+                try:
+                    return datetime.fromisoformat(existing[1])
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Failed to parse tariff_last_updated from database: {e}")
+                    return None
+            else:
                 return None
         else:
+            logger.info("No existing document found")
             return None
-    else:
-        logger.info("No existing document found")
+    except sqlite3.Error as e:
+        logger.error(f"Database error in find_existing_document: {e}")
         return None
+    finally:
+        if conn:
+            conn.close()
 
 def generate_report(all_report_data, input_file_path):
     """Generate a Markdown report file with summary table and detailed sections."""
