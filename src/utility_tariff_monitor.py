@@ -165,7 +165,7 @@ def scrape_links(url):
         return []
 
 def select_best_url_with_llm(links):
-    """Use LLM to select URLs for commercial tariff rates and return with rationales."""
+    """Use LLM to select URLs for commercial tariff rates and return with rationales and response."""
     logger.info("Using LLM to select best URLs...")
     if not GOOGLE_API_KEY:
         logger.error("GOOGLE_API_KEY not found in environment")
@@ -184,25 +184,28 @@ def select_best_url_with_llm(links):
             If multiple Utility Companies are listed, return one tariff for each Utility.
             Use the context to understand the hierarchical structure and relevance of each link.
 
-            IMPORTANT: Your response must be ONLY a valid JSON array. Do not include any explanations, comments, or additional text.
+            IMPORTANT: Your response must be ONLY a valid JSON object. Do not include any explanations, comments, or additional text outside the JSON.
 
-            Return a JSON array where each element is an object with:
-            - "url": the URL of the tariff document
-            - "rationale": brief explanation of why this URL was selected
+            Return a JSON object with two keys:
+            - "urls": an array where each element is an object with "url" and "rationale"
+            - "response": a string explaining the selection process or issues encountered
 
-            If no suitable URLs are found, return an empty array: []
+            If no suitable URLs are found, set "urls" to an empty array and provide an explanation in "response" about why no URLs were selected.
 
             Example response format (return ONLY the JSON, nothing else):
-            [
-                {{
-                    "url": "https://example.com/abc_tariff.pdf",
-                    "rationale": "Contains commercial electrical service rates for Utility ABC"
-                }},
-                {{
-                    "url": "https://example.com/xyz_tariff.pdf",
-                    "rationale": "General service tariff document with commercial rates for Utility XYZ"
-                }}
-            ]
+            {{
+                "urls": [
+                    {{
+                        "url": "https://example.com/abc_tariff.pdf",
+                        "rationale": "Contains commercial electrical service rates for Utility ABC"
+                    }},
+                    {{
+                        "url": "https://example.com/xyz_tariff.pdf",
+                        "rationale": "General service tariff document with commercial rates for Utility XYZ"
+                    }}
+                ],
+                "response": "Selected two commercial tariff documents from different utilities based on keyword matching and context analysis."
+            }}
 
             Links:
             {links}
@@ -213,40 +216,36 @@ def select_best_url_with_llm(links):
         result = chain.run(links=links_text)
         result = result.strip()
 
-        logger.info(">> LLM Response")
-        logger.info(result)
-
         # Parse JSON response - handle markdown code blocks
         import json
         import re
 
         # Extract JSON from markdown code blocks if present
-        json_match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', result, re.DOTALL)
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', result, re.DOTALL)
         if json_match:
             json_content = json_match.group(1)
         else:
-            # Try to find JSON array directly
-            json_match = re.search(r'(\[.*\])', result, re.DOTALL)
+            # Try to find JSON object directly
+            json_match = re.search(r'(\{.*\})', result, re.DOTALL)
             if json_match:
                 json_content = json_match.group(1)
             else:
                 json_content = result
 
         try:
-            selected_urls = json.loads(json_content)
-            if not isinstance(selected_urls, list):
-                raise ValueError("LLM response is not a JSON array")
+            response_data = json.loads(json_content)
+            if not isinstance(response_data, dict) or 'urls' not in response_data or 'response' not in response_data:
+                raise ValueError("LLM response is not a valid JSON object with required keys")
         except json.JSONDecodeError as e:
-            # Check if the response contains "NO_URL_FOUND" or similar
-            if "NO_URL_FOUND" in result.upper() or "no suitable" in result.lower():
-                logger.info("LLM indicated no suitable URLs found")
-                return []
-            else:
-                logger.error(f"Failed to parse LLM response as JSON. Raw response: {result}")
-                logger.error(f"Extracted JSON content: {json_content}")
-                raise ValueError(f"LLM returned invalid JSON: {e}")
+            logger.error(f"Failed to parse LLM response as JSON. Raw response: {result}")
+            logger.error(f"Extracted JSON content: {json_content}")
+            raise ValueError(f"LLM returned invalid JSON: {e}")
+
+        selected_urls = response_data['urls']
+        llm_response = response_data['response']
 
         logger.info(f"LLM selected {len(selected_urls)} URLs")
+        logger.info(f"LLM Response: {llm_response}")
 
         # Validate URLs
         valid_urls = []
@@ -265,13 +264,12 @@ def select_best_url_with_llm(links):
 
         if not valid_urls:
             logger.warning("No valid URLs found in LLM response")
-            return []
 
         # Log selected URLs with rationales
         for item in valid_urls:
             logger.info(f"Selected URL: {item['url']} | Rationale: {item['rationale']}")
 
-        return valid_urls
+        return valid_urls, llm_response
     except Exception as e:
         logger.error(f"Error with LLM: {e}")
         raise
@@ -386,10 +384,11 @@ def process_seed_url(seed_url, quick_mode=False):
         logger.error(f"No links found for {seed_url}")
         return
 
+    # Only use LLM to select URLs when there are more than a single link
     if len(links) == 1:
-        selected_urls = links[0]
+        selected_urls, llm_response = links[0], "n/a"
     elif len(links) > 1:
-        selected_urls = select_best_url_with_llm(links)
+        selected_urls, llm_response = select_best_url_with_llm(links)
 
     if not selected_urls:
         logger.warning(f"No URLs selected by LLM for {seed_url}")
