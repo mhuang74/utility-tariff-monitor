@@ -1,13 +1,14 @@
 https://tnmp.com/customers/rates-0
-https://austinenergy.com/rates/approved-rates-schedules
+#https://austinenergy.com/rates/approved-rates-schedules
 https://www.prairielandelectric.com/rate-schedule-tariffs
-https://www.surprisevalleyelectric.org/svec-rates
-https://www.ecirec.coop/eci-rec-tariff-terms-and-conditions
-https://www.appalachianpower.com/company/about/rates/va/
-https://www.entergyarkansas.com/business/price
+#https://www.surprisevalleyelectric.org/svec-rates
+#https://www.ecirec.coop/eci-rec-tariff-terms-and-conditions
+#https://www.appalachianpower.com/company/about/rates/va/
+#https://www.entergyarkansas.com/business/price
 https://www.cleco.com/residential-commercial/rates-billing-payment/rates-fees
-https://www.firstenergycorp.com/content/customer/customer_choice/ohio_/ohio_tariffs.html
-https://www.aes-ohio.com/rates-tariffs
-https://www.coserv.com/service/commercial/commercial-rates/
+#https://www.firstenergycorp.com/content/customer/customer_choice/ohio_/ohio_tariffs.html
+#https://www.aes-ohio.com/rates-tariffs
+#https://www.coserv.com/service/commercial/commercial-rates/
+# LLM sometimes selects no url
 https://fkec.com/access-your-account/billing-information-fees-2/
 https://www.fpl.com/rates.html
