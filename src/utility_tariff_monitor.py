@@ -284,8 +284,9 @@ def download_and_hash_pdf(url):
         response = requests.get(url, headers=pdf_headers, timeout=120)
         response.raise_for_status()
         if 'application/pdf' not in response.headers.get('content-type', ''):
-            logger.error("Downloaded content is not a PDF")
-            return None, None, None
+            error_msg = "Downloaded content is not a PDF"
+            logger.error(error_msg)
+            return None, None, None, error_msg
 
         content = response.content
         pdf_hash = hashlib.sha256(content).hexdigest()
@@ -301,10 +302,11 @@ def download_and_hash_pdf(url):
                 logger.warning(f"Failed to parse Last-Modified header: {e}")
 
         logger.info(f"PDF downloaded, hash: {pdf_hash}")
-        return pdf_hash, document_name, last_modified
+        return pdf_hash, document_name, last_modified, None
     except requests.RequestException as e:
-        logger.error(f"Error downloading PDF: {e}")
-        return None, None, None
+        error_msg = f"HTTP {getattr(e.response, 'status_code', 'Unknown')} - {str(e)}"
+        logger.error(f"Error downloading PDF: {error_msg}")
+        return None, None, None, error_msg
 
 def update_database(utility_name, url, document_name, pdf_hash, last_modified, link_text):
     """Update or insert record in database."""
@@ -332,6 +334,7 @@ def update_database(utility_name, url, document_name, pdf_hash, last_modified, l
                 WHERE id = ?
             """, (pdf_hash, now, tariff_last_updated, url, link_text, existing[0]))
             logger.info("Updated existing record with new hash")
+            status = "UPDATED"
         else:
             cursor.execute("""
                 UPDATE tariff_documents
@@ -339,6 +342,7 @@ def update_database(utility_name, url, document_name, pdf_hash, last_modified, l
                 WHERE id = ?
             """, (now, existing[0]))
             logger.info("No changes detected, only updated last_checked")
+            status = "NO CHANGE"
     else:
         # Mark existing as obsolete
         cursor.execute("""
@@ -353,9 +357,11 @@ def update_database(utility_name, url, document_name, pdf_hash, last_modified, l
             VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?)
         """, (utility_name, url, document_name, pdf_hash, now, tariff_last_updated, link_text))
         logger.info("Inserted new record")
+        status = "ADDED"
 
     conn.commit()
     conn.close()
+    return status, tariff_last_updated
 
 def get_utility_name_from_url(url):
     """Derive utility name from URL domain."""
@@ -369,7 +375,7 @@ def get_utility_name_from_url(url):
     return utility_name
 
 def process_seed_url(seed_url, quick_mode=False):
-    """Process a single seed URL through the full pipeline."""
+    """Process a single seed URL through the full pipeline and return aggregated report data."""
     logger.info(f"{'='*60}")
     logger.info(f"PROCESSING SEED URL: {seed_url}")
     if quick_mode:
@@ -380,21 +386,57 @@ def process_seed_url(seed_url, quick_mode=False):
     logger.info(f"Derived utility name: {utility_name}")
 
     links = scrape_links(seed_url)
+    potential_urls_found = len(links)
+    errors_encountered = 0
+
     if not links:
         logger.error(f"No links found for {seed_url}")
-        return
+        return {
+            'utility_name': utility_name,
+            'seed_url': seed_url,
+            'potential_urls_found': 0,
+            'llm_selections': 0,
+            'llm_selection_response': 'No PDF links found on the page',
+            'records_added': 0,
+            'records_updated': 0,
+            'errors_encountered': 1,
+            'selected_urls_details': []
+        }
 
     # Only use LLM to select URLs when there are more than a single link
     if len(links) == 1:
-        selected_urls, llm_response = links[0], "n/a"
+        selected_urls = [{'url': links[0]['url'], 'rationale': 'Only one PDF link found on page'}]
+        llm_response = "Only one PDF link found, no LLM selection needed"
     elif len(links) > 1:
-        selected_urls, llm_response = select_best_url_with_llm(links)
+        try:
+            selected_urls, llm_response = select_best_url_with_llm(links)
+        except Exception as e:
+            logger.error(f"LLM selection failed for {seed_url}: {e}")
+            selected_urls = []
+            llm_response = f"LLM selection failed: {str(e)}"
+            errors_encountered += 1
+
+    llm_selections = len(selected_urls) if selected_urls else 0
 
     if not selected_urls:
         logger.warning(f"No URLs selected by LLM for {seed_url}")
-        return
+        return {
+            'utility_name': utility_name,
+            'seed_url': seed_url,
+            'potential_urls_found': potential_urls_found,
+            'llm_selections': 0,
+            'llm_selection_response': llm_response,
+            'records_added': 0,
+            'records_updated': 0,
+            'errors_encountered': errors_encountered,
+            'selected_urls_details': []
+        }
 
     logger.info(f"Processing {len(selected_urls)} selected URLs for {seed_url}")
+
+    selected_urls_details = []
+    records_added = 0
+    records_updated = 0
 
     # Process each selected URL
     for i, url_info in enumerate(selected_urls, 1):
@@ -415,6 +457,10 @@ def process_seed_url(seed_url, quick_mode=False):
         if not link_text:
             logger.warning(f"Link text not found for selected URL: {current_url}")
             link_text = ""
+
+        document_changed = False
+        db_status = "N/A"
+        last_modified = "N/A"
 
         # Quick mode logic for each URL
         skip_download = False
@@ -440,24 +486,76 @@ def process_seed_url(seed_url, quick_mode=False):
                         conn.close()
                         logger.info(f"Completed processing URL {i} (quick mode - no changes)")
                         skip_download = True
+                        document_changed = False
+                        db_status = "NO CHANGE"
+                        last_modified = existing_last_modified.strftime('%Y-%m-%d %H:%M:%S') if existing_last_modified else "N/A"
                     else:
                         logger.info("PDF has been modified. Proceeding with download.")
+                        document_changed = True
                 else:
                     logger.warning("Could not fetch Last-Modified header. Proceeding with download.")
+                    document_changed = True
             else:
                 logger.info("No existing document found. Proceeding with download.")
+                document_changed = True
+
+        error_detail = None
 
         if not skip_download:
-            pdf_hash, document_name, last_modified = download_and_hash_pdf(current_url)
+            pdf_hash, document_name, last_modified_raw, error_detail = download_and_hash_pdf(current_url)
             if not pdf_hash:
                 logger.error(f"Failed to download or hash PDF for URL {i}: {current_url}")
+                errors_encountered += 1
+                selected_urls_details.append({
+                    'url': current_url,
+                    'rationale': rationale,
+                    'document_changed': False,
+                    'db_status': 'DOWNLOAD FAILED',
+                    'last_modified': 'N/A',
+                    'error_detail': error_detail
+                })
                 continue
 
-            update_database(utility_name, current_url, document_name, pdf_hash, last_modified, link_text)
+            try:
+                db_status, last_modified_datetime = update_database(utility_name, current_url, document_name, pdf_hash, last_modified_raw, link_text)
+                last_modified = last_modified_datetime.strftime('%Y-%m-%d %H:%M:%S') if last_modified_datetime else "N/A"
+                document_changed = db_status == "UPDATED"
+
+                if db_status == "ADDED":
+                    records_added += 1
+                elif db_status == "UPDATED":
+                    records_updated += 1
+            except Exception as e:
+                logger.error(f"Database update failed for {current_url}: {e}")
+                errors_encountered += 1
+                db_status = "DB ERROR"
+                last_modified = "N/A"
+                error_detail = f"Database error: {str(e)}"
+
+        selected_urls_details.append({
+            'url': current_url,
+            'rationale': rationale,
+            'document_changed': document_changed,
+            'db_status': db_status,
+            'last_modified': last_modified,
+            'error_detail': error_detail
+        })
 
         logger.info(f"Completed processing URL {i}/{len(selected_urls)}: {current_url}")
 
     logger.info(f"Completed processing all {len(selected_urls)} URLs for {seed_url}")
+
+    return {
+        'utility_name': utility_name,
+        'seed_url': seed_url,
+        'potential_urls_found': potential_urls_found,
+        'llm_selections': llm_selections,
+        'llm_selection_response': llm_response,
+        'records_added': records_added,
+        'records_updated': records_updated,
+        'errors_encountered': errors_encountered,
+        'selected_urls_details': selected_urls_details
+    }
 
 def get_pdf_last_modified(url):
     """Fetch Last-Modified header from PDF URL using HEAD request."""
@@ -510,6 +608,69 @@ def find_existing_document(utility_name, url, link_text):
         logger.info("No existing document found")
         return None
 
+def generate_report(all_report_data, input_file_path):
+    """Generate a Markdown report file with summary table and detailed sections."""
+    if not all_report_data:
+        logger.warning("No report data to generate")
+        return
+
+    # Create report filename
+    input_filename = os.path.basename(input_file_path)
+    report_filename = input_filename.replace('.txt', '_run_report.md')
+    report_path = os.path.join(os.path.dirname(input_file_path), report_filename)
+
+    logger.info(f"Generating report: {report_path}")
+
+    with open(report_path, 'w') as f:
+        f.write("# Utility Tariff Monitor Run Report\n\n")
+        f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        f.write(f"Input file: {input_filename}\n\n")
+
+        # Part 1: Summary Table
+        f.write("## Summary Table\n\n")
+        f.write("| # | Utility Name | PDFs Found | LLM Selections | LLM Response | Records Added | Records Updated | Errors |\n")
+        f.write("|---|--------------|------------|----------------|--------------|---------------|-----------------|--------|\n")
+
+        for i, seed_data in enumerate(all_report_data, 1):
+            utility_name = seed_data['utility_name']
+            pdfs_found = seed_data['potential_urls_found']
+            llm_selections = seed_data['llm_selections']
+            llm_response = seed_data['llm_selection_response'][:50] + "..." if len(seed_data['llm_selection_response']) > 50 else seed_data['llm_selection_response']
+            records_added = seed_data['records_added']
+            records_updated = seed_data['records_updated']
+            errors = seed_data['errors_encountered']
+
+            f.write(f"| {i} | {utility_name} | {pdfs_found} | {llm_selections} | {llm_response} | {records_added} | {records_updated} | {errors} |\n")
+
+        # Part 2: Detailed Information
+        f.write("\n## Detailed Information\n\n")
+
+        for i, seed_data in enumerate(all_report_data, 1):
+            f.write(f"### Seed URL {i}: {seed_data['utility_name']} - {seed_data['seed_url']}\n\n")
+            f.write(f"**Potential PDF URLs Found:** {seed_data['potential_urls_found']}\n\n")
+            f.write(f"**LLM Selections:** {seed_data['llm_selections']}\n\n")
+            f.write(f"**LLM Selection Response:** {seed_data['llm_selection_response']}\n\n")
+            f.write(f"**Records Added:** {seed_data['records_added']}\n\n")
+            f.write(f"**Records Updated:** {seed_data['records_updated']}\n\n")
+            f.write(f"**Errors Encountered:** {seed_data['errors_encountered']}\n\n")
+
+            if seed_data['selected_urls_details']:
+                f.write("**Selected URLs Details:**\n\n")
+                for j, url_detail in enumerate(seed_data['selected_urls_details'], 1):
+                    f.write(f"#### URL {j}\n")
+                    f.write(f"- **URL:** {url_detail['url']}\n")
+                    f.write(f"- **LLM Rationale:** {url_detail['rationale']}\n")
+                    f.write(f"- **PDF Has Changed:** {'Yes' if url_detail['document_changed'] else 'No'}\n")
+                    f.write(f"- **Database Status:** {url_detail['db_status']}\n")
+                    f.write(f"- **PDF Last Modified:** {url_detail['last_modified']}\n")
+                    if url_detail.get('error_detail'):
+                        f.write(f"- **Error Detail:** {url_detail['error_detail']}\n")
+                    f.write("\n")
+            else:
+                f.write("**No URLs were selected for processing.**\n\n")
+
+    logger.info(f"Report generated successfully: {report_path}")
+
 def main():
     """Main execution function."""
     parser = argparse.ArgumentParser(description='Monitor utility tariff documents')
@@ -531,14 +692,20 @@ def main():
 
     logger.info(f"Processing {len(seed_urls)} seed URLs")
 
+    all_report_data = []
     for seed_url in seed_urls:
         try:
-            process_seed_url(seed_url, args.quick)
+            report_data = process_seed_url(seed_url, args.quick)
+            if report_data:
+                all_report_data.append(report_data)
         except Exception as e:
             logger.error(f"Error processing {seed_url}: {e}")
             continue
 
     logger.info("All seed URLs processed")
+
+    # Generate the report
+    generate_report(all_report_data, args.tariff_webpage_urls)
 
 if __name__ == "__main__":
     main()
